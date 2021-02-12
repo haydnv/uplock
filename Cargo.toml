@@ -1,0 +1,17 @@
+[package]
+name = "uplock"
+version = "0.1.0"
+authors = ["haydnv"]
+edition = "2018"
+description = "A futures-aware RwLock with ref_count, upgrade, and downgrade methods"
+license = "Apache-2.0"
+repository = "http://github.com/haydnv/uplock.git"
+
+keywords = ["async", "future", "lock"]
+categories = ["concurrency"]
+
+[dependencies]
+futures = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1.2", features = ["macros", "rt"] }
