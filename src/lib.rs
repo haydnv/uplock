@@ -41,7 +41,16 @@ impl<T> Deref for RwLockReadGuard<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        unsafe { &*self.lock.inner.value.get() }
+        unsafe {
+            &*self
+                .lock
+                .inner
+                .state
+                .lock()
+                .expect("RwLockReadGuard read")
+                .value
+                .get()
+        }
     }
 }
 
@@ -79,13 +88,31 @@ impl<T> Deref for RwLockWriteGuard<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        unsafe { &*self.lock.inner.value.get() }
+        unsafe {
+            &*self
+                .lock
+                .inner
+                .state
+                .lock()
+                .expect("RwLockWriteGuard read")
+                .value
+                .get()
+        }
     }
 }
 
 impl<T> DerefMut for RwLockWriteGuard<T> {
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.lock.inner.value.get() }
+        unsafe {
+            &mut *self
+                .lock
+                .inner
+                .state
+                .lock()
+                .expect("RwLockWriteGuard write")
+                .value
+                .get()
+        }
     }
 }
 
@@ -105,15 +132,15 @@ impl<T> Drop for RwLockWriteGuard<T> {
     }
 }
 
-struct LockState {
+struct LockState<T> {
     readers: usize,
     writer: bool,
     wakers: VecDeque<Waker>,
+    value: UnsafeCell<T>,
 }
 
 struct Inner<T> {
-    state: Mutex<LockState>,
-    value: UnsafeCell<T>,
+    state: Mutex<LockState<T>>,
 }
 
 pub struct RwLock<T> {
@@ -136,11 +163,11 @@ impl<T> RwLock<T> {
             readers: 0,
             writer: false,
             wakers: VecDeque::new(),
+            value: UnsafeCell::new(value),
         };
 
         let inner = Inner {
             state: Mutex::new(state),
-            value: UnsafeCell::new(value),
         };
 
         RwLock {

@@ -1,6 +1,6 @@
 [package]
 name = "uplock"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["haydn@tinychain.net"]
 edition = "2018"
 description = "A futures-aware RwLock with ref_count, upgrade, and downgrade methods"
