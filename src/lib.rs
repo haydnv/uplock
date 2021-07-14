@@ -28,7 +28,9 @@ impl<T> RwLockReadGuard<T> {
 
 impl<T> Clone for RwLockReadGuard<T> {
     fn clone(&self) -> RwLockReadGuard<T> {
-        self.lock.inner.lock().unwrap().state.readers += 1;
+        let mut state = self.lock.inner.state.lock().expect("RwLockReadGuard state");
+        state.readers += 1;
+
         RwLockReadGuard {
             lock: self.lock.clone(),
         }
@@ -39,21 +41,24 @@ impl<T> Deref for RwLockReadGuard<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        unsafe { &*self.lock.inner.lock().unwrap().value.get() }
+        unsafe { &*self.lock.inner.value.get() }
     }
 }
 
 impl<T> Drop for RwLockReadGuard<T> {
     fn drop(&mut self) {
-        let lock = &mut self.lock.inner.lock().unwrap();
-        lock.state.readers -= 1;
+        let mut state = self
+            .lock
+            .inner
+            .state
+            .lock()
+            .expect("RwLockReadGuard drop state");
+        state.readers -= 1;
 
-        if lock.state.readers == 0 {
-            while let Some(waker) = lock.state.wakers.pop_front() {
+        if state.readers == 0 {
+            while let Some(waker) = state.wakers.pop_front() {
                 waker.wake()
             }
-
-            lock.state.wakers.shrink_to_fit()
         }
     }
 }
@@ -74,26 +79,29 @@ impl<T> Deref for RwLockWriteGuard<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        unsafe { &*self.lock.inner.lock().unwrap().value.get() }
+        unsafe { &*self.lock.inner.value.get() }
     }
 }
 
 impl<T> DerefMut for RwLockWriteGuard<T> {
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.lock.inner.lock().unwrap().value.get() }
+        unsafe { &mut *self.lock.inner.value.get() }
     }
 }
 
 impl<T> Drop for RwLockWriteGuard<T> {
     fn drop(&mut self) {
-        let mut lock = self.lock.inner.lock().unwrap();
-        lock.state.writer = false;
+        let mut state = self
+            .lock
+            .inner
+            .state
+            .lock()
+            .expect("RwLockWriteGuard drop state");
+        state.writer = false;
 
-        while let Some(waker) = lock.state.wakers.pop_front() {
+        while let Some(waker) = state.wakers.pop_front() {
             waker.wake()
         }
-
-        lock.state.wakers.shrink_to_fit()
     }
 }
 
@@ -104,12 +112,12 @@ struct LockState {
 }
 
 struct Inner<T> {
-    state: LockState,
+    state: Mutex<LockState>,
     value: UnsafeCell<T>,
 }
 
 pub struct RwLock<T> {
-    inner: Arc<Mutex<Inner<T>>>,
+    inner: Arc<Inner<T>>,
 }
 
 impl<T> Clone for RwLock<T> {
@@ -131,23 +139,26 @@ impl<T> RwLock<T> {
         };
 
         let inner = Inner {
-            state,
+            state: Mutex::new(state),
             value: UnsafeCell::new(value),
         };
 
         RwLock {
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Arc::new(inner),
         }
     }
 
     /// Return a read lock synchronously if possible, otherwise `None`.
     pub fn try_read(&self) -> Option<RwLockReadGuard<T>> {
-        let lock = &mut self.inner.lock().unwrap();
-        if lock.state.writer {
-            None
+        if let Ok(mut state) = self.inner.state.try_lock() {
+            if state.writer {
+                None
+            } else {
+                state.readers += 1;
+                Some(RwLockReadGuard { lock: self.clone() })
+            }
         } else {
-            lock.state.readers += 1;
-            Some(RwLockReadGuard { lock: self.clone() })
+            None
         }
     }
 
@@ -158,13 +169,15 @@ impl<T> RwLock<T> {
 
     /// Return a write lock synchronously if possible, otherwise `None`.
     pub fn try_write(&self) -> Option<RwLockWriteGuard<T>> {
-        let lock = &mut self.inner.lock().unwrap();
-
-        if lock.state.writer || lock.state.readers > 0 {
-            None
+        if let Ok(mut state) = self.inner.state.try_lock() {
+            if state.writer || state.readers > 0 {
+                None
+            } else {
+                state.writer = true;
+                Some(RwLockWriteGuard { lock: self.clone() })
+            }
         } else {
-            lock.state.writer = true;
-            Some(RwLockWriteGuard { lock: self.clone() })
+            None
         }
     }
 
@@ -196,9 +209,9 @@ impl<T> Future for RwLockReadFuture<T> {
             None => {
                 self.lock
                     .inner
-                    .lock()
-                    .unwrap()
                     .state
+                    .lock()
+                    .expect("RwLockReadFuture state")
                     .wakers
                     .push_back(context.waker().clone());
 
@@ -222,9 +235,9 @@ impl<T> Future for RwLockWriteFuture<T> {
             None => {
                 self.lock
                     .inner
-                    .lock()
-                    .unwrap()
                     .state
+                    .lock()
+                    .expect("RwLockWriteFuture state")
                     .wakers
                     .push_back(context.waker().clone());
 
