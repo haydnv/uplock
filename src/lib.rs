@@ -6,7 +6,7 @@
 //! Does not use message passing.
 
 use std::cell::UnsafeCell;
-use std::mem;
+use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -64,14 +64,7 @@ impl<T> Drop for RwLockReadGuard<T> {
             .expect("RwLockReadGuard drop state");
 
         state.readers -= 1;
-
-        if state.readers == 0 {
-            let mut waker = None;
-            mem::swap(&mut state.waker, &mut waker);
-            if let Some(waker) = waker {
-                waker.wake();
-            }
-        }
+        state.wake();
     }
 }
 
@@ -129,20 +122,36 @@ impl<T> Drop for RwLockWriteGuard<T> {
             .expect("RwLockWriteGuard drop state");
 
         state.writer = false;
-
-        let mut waker = None;
-        mem::swap(&mut state.waker, &mut waker);
-        if let Some(waker) = waker {
-            waker.wake();
-        }
+        state.wake();
     }
 }
 
 struct LockState<T> {
     readers: usize,
     writer: bool,
-    waker: Option<Waker>,
+    next_id: usize,
+    wakers: HashMap<usize, Waker>,
     value: UnsafeCell<T>,
+}
+
+impl<T> LockState<T> {
+    fn consume_id(&mut self) -> usize {
+        let id = self.next_id;
+
+        self.next_id = if let Some(next) = self.next_id.checked_add(1) {
+            next
+        } else {
+            0
+        };
+
+        id
+    }
+
+    fn wake(&mut self) {
+        for (_, waker) in self.wakers.drain() {
+            waker.wake();
+        }
+    }
 }
 
 struct Inner<T> {
@@ -168,7 +177,8 @@ impl<T> RwLock<T> {
         let state = LockState {
             readers: 0,
             writer: false,
-            waker: None,
+            next_id: 0,
+            wakers: HashMap::new(),
             value: UnsafeCell::new(value),
         };
 
@@ -197,7 +207,9 @@ impl<T> RwLock<T> {
 
     /// Return a read lock asynchronously.
     pub fn read(&self) -> RwLockReadFuture<T> {
-        RwLockReadFuture { lock: self.clone() }
+        let mut state = self.inner.state.lock().expect("RwLock::read");
+        let id = state.consume_id();
+        RwLockReadFuture::new(id, self.clone())
     }
 
     /// Return a write lock synchronously if possible, otherwise `None`.
@@ -216,7 +228,9 @@ impl<T> RwLock<T> {
 
     /// Return a write lock asynchronously.
     pub fn write(&self) -> RwLockWriteFuture<T> {
-        RwLockWriteFuture { lock: self.clone() }
+        let mut state = self.inner.state.lock().expect("RwLock::write");
+        let id = state.consume_id();
+        RwLockWriteFuture::new(id, self.clone())
     }
 
     /// Return the current number of references to this `RwLock`.
@@ -230,7 +244,14 @@ impl<T> RwLock<T> {
 
 /// A [`Future`] representing a pending read lock.
 pub struct RwLockReadFuture<T> {
+    id: usize,
     lock: RwLock<T>,
+}
+
+impl<T> RwLockReadFuture<T> {
+    fn new(id: usize, lock: RwLock<T>) -> Self {
+        Self { id, lock }
+    }
 }
 
 impl<T> Future for RwLockReadFuture<T> {
@@ -240,10 +261,8 @@ impl<T> Future for RwLockReadFuture<T> {
         match self.lock.try_read() {
             Some(guard) => Poll::Ready(guard),
             None => {
-                let mut state = self.lock.inner.state.lock().expect("RwLockReadFuture state");
-
-                state.waker = Some(context.waker().clone());
-
+                let mut state = self.lock.inner.state.lock().unwrap();
+                state.wakers.insert(self.id, context.waker().clone());
                 Poll::Pending
             }
         }
@@ -252,7 +271,14 @@ impl<T> Future for RwLockReadFuture<T> {
 
 /// A [`Future`] representing a pending write lock.
 pub struct RwLockWriteFuture<T> {
+    id: usize,
     lock: RwLock<T>,
+}
+
+impl<T> RwLockWriteFuture<T> {
+    fn new(id: usize, lock: RwLock<T>) -> Self {
+        Self { id, lock }
+    }
 }
 
 impl<T> Future for RwLockWriteFuture<T> {
@@ -262,10 +288,8 @@ impl<T> Future for RwLockWriteFuture<T> {
         match self.lock.try_write() {
             Some(guard) => Poll::Ready(guard),
             None => {
-                let mut state = self.lock.inner.state.lock().expect("RwLockWriteFuture state");
-
-                state.waker = Some(context.waker().clone());
-
+                let mut state = self.lock.inner.state.lock().unwrap();
+                state.wakers.insert(self.id, context.waker().clone());
                 Poll::Pending
             }
         }
